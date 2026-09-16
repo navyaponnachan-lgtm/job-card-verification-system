@@ -289,6 +289,32 @@ QDoubleSpinBox:focus, QLineEdit:focus {{
     border: 1px solid {VIOLET};
 }}
 
+QComboBox {{
+    background: {CARD_BG_HOVER};
+    border: 1px solid {CARD_BORDER};
+    border-radius: 6px;
+    padding: 5px 8px;
+    color: {TEXT_PRIMARY};
+    font-size: 12px;
+}}
+
+QComboBox:hover {{
+    border-color: {VIOLET};
+}}
+
+QComboBox::drop-down {{
+    border: none;
+}}
+
+QComboBox QAbstractItemView {{
+    background: {CARD_BG};
+    border: 1px solid {CARD_BORDER};
+    color: {TEXT_PRIMARY};
+    outline: none;
+    selection-background-color: {VIOLET_LIGHT};
+    selection-color: {TEXT_PRIMARY};
+}}
+
 QLabel {{
     color: {TEXT_PRIMARY};
 }}
@@ -369,6 +395,39 @@ QLabel#ToastLabel {{
     font-weight: 500;
 }}
 """
+
+
+def build_palette():
+    """
+    A QPalette built from the same color tokens as STYLESHEET above. QSS
+    styles most widgets fully, but a few things fall outside it — some
+    disabled-state colors, tooltips, and parts of native dialogs — and
+    those fall back to Qt's default palette, which on Windows/macOS is
+    partly derived from the OS's light/dark setting. Setting this
+    palette explicitly (in main.py, alongside app.setStyle("Fusion"))
+    means those leftover bits match the app's own "aurora dark" colors
+    regardless of the system theme.
+    """
+    from PySide6.QtGui import QPalette, QColor
+
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(APP_BG))
+    palette.setColor(QPalette.WindowText, QColor(TEXT_PRIMARY))
+    palette.setColor(QPalette.Base, QColor(CARD_BG))
+    palette.setColor(QPalette.AlternateBase, QColor(CARD_BG_HOVER))
+    palette.setColor(QPalette.ToolTipBase, QColor(CARD_BG_HOVER))
+    palette.setColor(QPalette.ToolTipText, QColor(TEXT_PRIMARY))
+    palette.setColor(QPalette.Text, QColor(TEXT_PRIMARY))
+    palette.setColor(QPalette.Button, QColor(CARD_BG_HOVER))
+    palette.setColor(QPalette.ButtonText, QColor(TEXT_PRIMARY))
+    palette.setColor(QPalette.BrightText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.Highlight, QColor(VIOLET))
+    palette.setColor(QPalette.HighlightedText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.PlaceholderText, QColor(TEXT_SECONDARY))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#4B5065"))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#4B5065"))
+    palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#4B5065"))
+    return palette
 
 
 def make_app_icon():

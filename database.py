@@ -43,10 +43,17 @@ def init_db(db_path: str = DB_PATH) -> None:
             account_book_total REAL,
             account_book_line_count INTEGER,
             source_image TEXT,
+            resolved INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (run_id) REFERENCES runs (run_id)
         )
         """
     )
+    # Migration for databases created before "resolved" existed —
+    # CREATE TABLE IF NOT EXISTS above is a no-op on an existing file, so
+    # older verification.db files need the column added explicitly.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(results)").fetchall()}
+    if "resolved" not in existing_cols:
+        conn.execute("ALTER TABLE results ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
 
@@ -107,6 +114,26 @@ def list_runs(db_path: str = DB_PATH) -> list:
         out.append({**dict(run), "status_counts": {c["status"]: c["n"] for c in counts}})
     conn.close()
     return out
+
+
+def mark_resolved(
+    run_id: int,
+    serial_number,
+    source_image: str,
+    resolved: bool = True,
+    db_path: str = DB_PATH,
+) -> None:
+    """Persists the "Mark Resolved" toggle for one result row. Matched on
+    (run_id, serial_number, source_image) rather than result_id, since
+    run_batch()'s results don't carry the DB's auto-generated result_id
+    back to the caller — this triple is unique per saved result row."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE results SET resolved = ? WHERE run_id = ? AND serial_number = ? AND source_image = ?",
+        (1 if resolved else 0, run_id, serial_number, source_image),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_run_results(run_id: int, db_path: str = DB_PATH) -> list:

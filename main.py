@@ -13,6 +13,7 @@ Run with:  python main.py
 import os
 import sys
 import json
+import threading
 
 from PySide6.QtCore import (
     Qt, QThread, Signal, QObject, QRectF, QSize, QTimer,
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QListWidgetItem, QLabel, QStackedWidget,
     QTableWidget, QTableWidgetItem, QProgressBar, QFileDialog, QMessageBox,
-    QInputDialog, QLineEdit, QSplitter, QGroupBox,
+    QInputDialog, QLineEdit, QSplitter, QGroupBox, QComboBox,
     QButtonGroup, QStyledItemDelegate, QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect, QSpacerItem, QSizePolicy, QScrollArea, QFrame,
 )
@@ -380,12 +381,29 @@ class BatchWorker(QObject):
         self.account_book_paths = account_book_paths
         self.confidence_threshold = confidence_threshold
         self._stop_requested = False
+        # Set = running, cleared = paused. pipeline.run_batch calls
+        # progress_callback between every image, so blocking there pauses
+        # the run at a clean image boundary without pipeline.py needing to
+        # know pausing exists at all.
+        self._resume_event = threading.Event()
+        self._resume_event.set()
 
     def request_stop(self):
         """Called from the GUI thread when the user clicks Stop. Just
         flips a plain bool — CPython's GIL makes a single bool flag safe
         to read/write across threads without a lock for this purpose."""
         self._stop_requested = True
+        self._resume_event.set()  # unblock a paused run so it can see the stop and exit
+
+    def request_pause(self):
+        self._resume_event.clear()
+
+    def request_resume(self):
+        self._resume_event.set()
+
+    def _on_progress(self, done, total, message):
+        self._resume_event.wait()  # blocks here between images while paused
+        self.progress.emit(done, total, message)
 
     def run(self):
         try:
@@ -393,7 +411,7 @@ class BatchWorker(QObject):
                 self.job_card_paths,
                 self.account_book_paths,
                 confidence_threshold=self.confidence_threshold,
-                progress_callback=lambda done, total, msg: self.progress.emit(done, total, msg),
+                progress_callback=self._on_progress,
                 should_stop=lambda: self._stop_requested,
             )
             self.finished.emit(outcome)
@@ -411,6 +429,8 @@ class NewRunPage(QWidget):
         self.job_card_paths = []
         self.account_book_paths = []
         self.last_results = []
+        self.last_run_id = None
+        self.last_account_rows = []
         self.thread = None
         self.worker = None
 
@@ -463,6 +483,10 @@ class NewRunPage(QWidget):
         self.run_button = primary_button("▶️  Run Verification")
         self.run_button.clicked.connect(self.start_run)
         run_row.addWidget(self.run_button)
+        self.pause_button = secondary_button("⏸️ Pause")
+        self.pause_button.clicked.connect(self.toggle_pause)
+        self.pause_button.setEnabled(False)
+        run_row.addWidget(self.pause_button)
         self.stop_button = danger_button("⏹️ Stop")
         self.stop_button.clicked.connect(self.stop_run)
         self.stop_button.setEnabled(False)
@@ -493,17 +517,55 @@ class NewRunPage(QWidget):
         self.stat_strip_container = QVBoxLayout()
         self.stat_strip_container.setContentsMargins(0, 0, 0, 0)
         results_layout.addLayout(self.stat_strip_container)
+
+        filter_row = QHBoxLayout()
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("🔎 Search by client or serial number")
+        self.search_box.textChanged.connect(self.apply_filters)
+        filter_row.addWidget(self.search_box, stretch=1)
+        self.status_filter = QComboBox()
+        self.status_filter.addItem("All statuses", None)
+        for status in STATUS_ORDER:
+            emoji = theme.STATUS_EMOJI.get(status, "")
+            label = theme.STATUS_LABELS.get(status, status)
+            self.status_filter.addItem(f"{emoji}  {label}".strip(), status)
+        self.status_filter.currentIndexChanged.connect(self.apply_filters)
+        filter_row.addWidget(self.status_filter)
+        results_layout.addLayout(filter_row)
+
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(len(RESULT_COLUMNS))
         self.results_table.setHorizontalHeaderLabels([label for _, label in RESULT_COLUMNS])
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.results_table.setSortingEnabled(True)
         self.results_table.verticalHeader().setVisible(False)
         self.results_table.setShowGrid(False)
         self.results_table.verticalHeader().setDefaultSectionSize(38)
         self.results_table.setItemDelegateForColumn(STATUS_COLUMN_INDEX, StatusBadgeDelegate())
         self.results_table.setMinimumHeight(320)
+        self.results_table.itemSelectionChanged.connect(self.on_row_selected)
         results_layout.addWidget(self.results_table)
+
+        detail_group = QGroupBox("Selected Result")
+        detail_layout = QVBoxLayout(detail_group)
+        self.detail_label = QLabel("Select a row above to see the full comparison and take action.")
+        self.detail_label.setWordWrap(True)
+        detail_layout.addWidget(self.detail_label)
+        detail_btn_row = QHBoxLayout()
+        self.retry_button = secondary_button("🔁 Re-run this card")
+        self.retry_button.clicked.connect(self.retry_selected)
+        self.retry_button.setEnabled(False)
+        detail_btn_row.addWidget(self.retry_button)
+        self.resolve_button = secondary_button("✅ Mark Resolved")
+        self.resolve_button.clicked.connect(self.mark_resolved)
+        self.resolve_button.setEnabled(False)
+        detail_btn_row.addWidget(self.resolve_button)
+        detail_btn_row.addStretch()
+        detail_layout.addLayout(detail_btn_row)
+        results_layout.addWidget(detail_group)
+        self._selected_row_idx = None
+
         self.results_card = results_card
         outer.addWidget(results_card)
 
@@ -575,6 +637,9 @@ class NewRunPage(QWidget):
             return
 
         self.run_button.setEnabled(False)
+        self.pause_button.setEnabled(True)
+        self.pause_button.setText("⏸️ Pause")
+        self._paused = False
         self.stop_button.setEnabled(True)
         self.export_excel_button.setEnabled(False)
         self.export_pdf_button.setEnabled(False)
@@ -600,8 +665,21 @@ class NewRunPage(QWidget):
     def stop_run(self):
         if self.worker:
             self.worker.request_stop()
+        self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.status_label.setText("Stopping... (finishing the image currently in progress)")
+
+    def toggle_pause(self):
+        if not self.worker:
+            return
+        self._paused = not self._paused
+        if self._paused:
+            self.worker.request_pause()
+            self.pause_button.setText("▶️ Resume")
+            self.status_label.setText("Paused. Click Resume to continue.")
+        else:
+            self.worker.request_resume()
+            self.pause_button.setText("⏸️ Pause")
 
     def on_progress(self, done, total, message):
         self.progress_bar.setMaximum(total)
@@ -610,9 +688,12 @@ class NewRunPage(QWidget):
 
     def on_finished(self, outcome):
         self.run_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         results = outcome["results"]
         self.last_results = results
+        self.last_run_id = outcome.get("run_id")
+        self.last_account_rows = outcome.get("account_rows", [])
         failed = outcome["failed_extractions"]
         stopped_early = outcome.get("stopped_early", False)
 
@@ -654,6 +735,7 @@ class NewRunPage(QWidget):
 
     def on_failed(self, error_message):
         self.run_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.status_label.setText("Run failed.")
         QMessageBox.critical(self, "Run Failed", error_message)
@@ -669,15 +751,122 @@ class NewRunPage(QWidget):
         self._clear_layout(self.stat_strip_container)
         self.stat_strip_container.addWidget(build_stat_strip(pipeline.summarize(results)))
 
+        # Sorting must be off while populating, or QTableWidget reshuffles
+        # rows mid-insert and rows end up with mismatched cell data.
+        self.results_table.setSortingEnabled(False)
         self.results_table.setRowCount(len(results))
         for row_idx, result in enumerate(results):
             for col_idx, (key, _) in enumerate(RESULT_COLUMNS):
                 item = _result_cell_item(key, result.get(key))
                 if col_idx != STATUS_COLUMN_INDEX:
                     item.setForeground(QColor(theme.TEXT_PRIMARY))
+                if col_idx == 0:
+                    # Carry the full result dict on the row so selection,
+                    # retry, and resolve all work off the real data —
+                    # never off a positional row index, which sorting and
+                    # filtering both invalidate.
+                    item.setData(Qt.UserRole, result)
                 self.results_table.setItem(row_idx, col_idx, item)
+        self.results_table.setSortingEnabled(True)
         self.results_table.resizeColumnsToContents()
         self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.apply_filters()
+        self.on_row_selected()
+
+    def apply_filters(self):
+        query = self.search_box.text().strip().lower()
+        status_filter = self.status_filter.currentData()
+        client_col = [i for i, (key, _) in enumerate(RESULT_COLUMNS) if key == "job_card_client"][0]
+        serial_col = [i for i, (key, _) in enumerate(RESULT_COLUMNS) if key == "serial_number"][0]
+        for row in range(self.results_table.rowCount()):
+            status_item = self.results_table.item(row, STATUS_COLUMN_INDEX)
+            client_item = self.results_table.item(row, client_col)
+            serial_item = self.results_table.item(row, serial_col)
+            status = status_item.text() if status_item else ""
+            haystack = f"{client_item.text() if client_item else ''} {serial_item.text() if serial_item else ''}".lower()
+            matches_query = query in haystack if query else True
+            matches_status = (status_filter is None) or (status == status_filter)
+            self.results_table.setRowHidden(row, not (matches_query and matches_status))
+
+    def on_row_selected(self):
+        rows = self.results_table.selectionModel().selectedRows() if self.results_table.selectionModel() else []
+        if not rows:
+            self._selected_row_idx = None
+            self.detail_label.setText("Select a row above to see the full comparison and take action.")
+            self.retry_button.setEnabled(False)
+            self.resolve_button.setEnabled(False)
+            return
+
+        row_idx = rows[0].row()
+        self._selected_row_idx = row_idx
+        item = self.results_table.item(row_idx, 0)
+        result = item.data(Qt.UserRole) if item else None
+        if not result:
+            return
+
+        resolved_note = "  •  ✅ marked resolved" if result.get("resolved") else ""
+        self.detail_label.setText(
+            f"Serial {result.get('serial_number')} — {result.get('job_card_client') or 'Unknown client'}{resolved_note}\n"
+            f"Job card total: {result.get('job_card_service_total')}\n"
+            f"Account book total: {result.get('account_book_total')}\n"
+            f"Reason: {result.get('reason')}"
+        )
+        can_retry = bool(result.get("source_image")) and result.get("status") != "VERIFIED"
+        self.retry_button.setEnabled(can_retry)
+        self.resolve_button.setEnabled(True)
+
+    def retry_selected(self):
+        if self._selected_row_idx is None:
+            return
+        item = self.results_table.item(self._selected_row_idx, 0)
+        result = item.data(Qt.UserRole) if item else None
+        if not result or not result.get("source_image"):
+            return
+        if not ensure_api_key(self):
+            return
+
+        self.status_label.setText(f"Re-running serial {result.get('serial_number')}…")
+        try:
+            # Verifies against the account book rows already extracted
+            # during the original run — no re-reading of ledger pages,
+            # and no new row in History (retrying a card corrects an
+            # existing run's result, it isn't a new run).
+            updated = pipeline.retry_job_card(
+                result["source_image"],
+                self.last_account_rows,
+                confidence_threshold=verifier.CONFIDENCE_THRESHOLD_DEFAULT,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Retry Failed", str(e))
+            return
+
+        if not updated:
+            QMessageBox.warning(self, "Retry Failed", "Could not re-read this job card image.")
+            return
+
+        for i, r in enumerate(self.last_results):
+            if r.get("source_image") == result.get("source_image"):
+                self.last_results[i] = updated
+                break
+        self.render_results(self.last_results)
+        self.status_label.setText(f"Serial {updated.get('serial_number')} re-run: {updated.get('status')}.")
+
+    def mark_resolved(self):
+        if self._selected_row_idx is None:
+            return
+        item = self.results_table.item(self._selected_row_idx, 0)
+        result = item.data(Qt.UserRole) if item else None
+        if not result or self.last_run_id is None:
+            return
+        result["resolved"] = True
+        database.mark_resolved(
+            self.last_run_id,
+            result.get("serial_number"),
+            result.get("source_image"),
+            resolved=True,
+        )
+        self.on_row_selected()
+        self.status_label.setText(f"Serial {result.get('serial_number')} marked resolved and saved.")
 
     def export_excel(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Excel", "verification_report.xlsx", "Excel Files (*.xlsx)")
@@ -854,6 +1043,12 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    # Fusion is a style Qt renders itself rather than deferring to the
+    # native OS theme engine — combined with the explicit palette below,
+    # this stops the app's colors from shifting when the system is in
+    # dark (or light) mode.
+    app.setStyle("Fusion")
+    app.setPalette(theme.build_palette())
     app.setStyleSheet(theme.STYLESHEET)
     window = MainWindow()
     window.showMaximized()

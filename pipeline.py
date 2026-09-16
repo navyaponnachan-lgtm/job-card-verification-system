@@ -63,6 +63,7 @@ def run_batch(
           "results": [ {..verdict.., "source_image": path}, ... ],
           "failed_extractions": [ {"image": path, "error": str}, ... ],
           "stopped_early": bool,
+          "account_rows": [ {..extracted row.., "source_image": path}, ... ],
         }
     """
     total_steps = len(job_card_paths) + len(account_book_paths) * ACCOUNT_BOOK_RUNS
@@ -135,7 +136,36 @@ def run_batch(
         "results": results,
         "failed_extractions": failed_extractions,
         "stopped_early": stopped_early,
+        "account_rows": account_rows,
     }
+
+
+def retry_job_card(
+    job_card_path: str,
+    account_rows: list,
+    confidence_threshold: float = verifier.CONFIDENCE_THRESHOLD_DEFAULT,
+) -> dict:
+    """
+    Re-extracts and re-verifies ONE job card against an already-extracted
+    pool of account book rows — used by the UI's "re-run this card"
+    action. Deliberately does NOT call database.save_run(): retrying one
+    card is a correction to an existing run's result, not a new run, so
+    it must not create a phantom single-card entry in History.
+
+    account_rows should be the same list returned in a prior
+    run_batch() outcome's "account_rows" key — re-using it avoids paying
+    for a fresh ACCOUNT_BOOK_RUNS-pass re-read of every ledger page just
+    to check one job card.
+    """
+    card = extract_job_card(job_card_path)
+    if card is None:
+        return None
+    card["source_image"] = job_card_path
+
+    grouped = verifier.group_account_book_by_serial(account_rows)
+    result = verifier.verify_job_card(card, grouped, confidence_threshold)
+    result["source_image"] = job_card_path
+    return result
 
 
 def summarize(results: list) -> dict:

@@ -20,3 +20,8 @@ ppt_screenshot_ledgerlens.png
 # the public repo
 *.pptx
 *.pdf
+
+# a local backup/reference copy of this same project (has its own
+# config.json with a real API key and real sample images inside it) -
+# never meant to be committed
+/verification_system/
