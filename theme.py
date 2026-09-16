@@ -164,8 +164,8 @@ QPushButton:hover {{
 }}
 
 QPushButton:disabled {{
-    color: #4B5065;
-    background: #14151D;
+    color: {TEXT_SECONDARY};
+    background: {CARD_BG_HOVER};
     border-color: {CARD_BORDER};
 }}
 
@@ -183,8 +183,9 @@ QPushButton[class="primary"]:hover {{
 }}
 
 QPushButton[class="primary"]:disabled {{
-    background: #2C2A3E;
-    color: #6B6F82;
+    background: {CARD_BG_HOVER};
+    color: {TEXT_SECONDARY};
+    border: 1px solid {CARD_BORDER};
 }}
 
 QPushButton[class="danger"] {{
@@ -202,9 +203,9 @@ QPushButton[class="danger"]:hover {{
 }}
 
 QPushButton[class="danger"]:disabled {{
-    background: #1A1B24;
-    color: #4B5065;
-    border-color: {CARD_BORDER};
+    background: {CARD_BG_HOVER};
+    color: {TEXT_SECONDARY};
+    border: 1px solid {CARD_BORDER};
 }}
 
 QListWidget {{
