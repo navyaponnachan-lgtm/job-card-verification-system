@@ -1,0 +1,19 @@
+config.json
+verification.db
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+installer_output/
+.claude/settings.local.json
+
+# real client photos used only for local testing - contain a real
+# person's name, phone number, and amounts; not meant for the public repo
+1000138302.jpg
+1000138303.jpg
+
+# mentor-facing progress decks/scripts - kept locally only, not part of
+# the public repo
+*.pptx
+*.pdf
